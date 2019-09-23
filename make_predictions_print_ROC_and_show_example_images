@@ -1,8 +1,13 @@
-# This script loads trained network with a name selected in "network_name_to_load", settles its architecture, than uploads its weights, feeds it with images to make predictions
-# The network was trained on PNG images with 356x356 pixel size, te input has to be the same, the colour channels must be taken care by the user, script will resize images if not 356x356 automatically
+# This script loads trained network with a name selected in "network_name_to_load", settles its architecture, 
+# than uploads its weights, feeds it with images to make predictions.
+# The network was trained on PNG images with 356x356 pixel size, te input has to be the same, the colour channels
+# must be taken care by the user, script will resize images if not 356x356 automatically.
 # I  have my data set of images and labels saved in the same order, so I iterate through them by indexing. 
-# Function image_names loads names of images from the folder they are saved at, image_labels does the same with labels. Function load_image loads image and command model.predict makes network classifying command's input image.
-# Saving predictions to atext file is commented, thhe script is made mainly for evaluation of a network on a test data set, so there is a part which compares networks predictions with actual labels and plots ROC curve, if using on an unknown objects, comment the end parts (stated where to comment from in a comment) at the end and uncomment saving of predictions.
+# Function image_names loads names of images from the folder they are saved at, image_labels does the same with labels. 
+# Function load_image loads image and command model.predict makes network classifying command's input image.
+# Saving predictions to atext file is commented, thhe script is made mainly for evaluation of a network on a test data set,
+# so there is a part which compares networks predictions with actual labels and plots ROC curve, if using on an unknown objects,
+# comment the end parts (stated where to comment from in a comment) at the end and uncomment saving of predictions.
 
 import numpy as np
 import skimage
