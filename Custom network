@@ -1,0 +1,499 @@
+# Script takes prepared data (X-ray and optical images with corresponding labels) of XCLASS cluster candidates, the custom network is than created, it is trained on the images.
+# Script than saves ROC curve, history of losses and accs during training and evaluates network on a test data set
+
+import matplotlib
+matplotlib.use('Agg')
+
+import numpy as np
+import skimage
+import skimage.transform
+import skimage.io
+import matplotlib.pyplot as plt
+import os
+from os import listdir
+from os.path import isfile, join
+from resizeimage import resizeimage #If imagenet weights are being loaded, input must have a static square shape (one of (128,128), (160,160), (192,192), or (224, 224)). Input shape provided = (356, 356, 3)
+
+
+import keras
+from keras import applications
+from keras.applications.xception import Xception
+#from keras.applications.inception_v3 import InceptionV3
+#from keras.applications.vgg19 import VGG19
+from keras.preprocessing import image
+from keras.applications.vgg19 import preprocess_input
+from keras.models import Model
+from keras import optimizers
+from keras.layers import Dense, GlobalAveragePooling2D, Dropout, Convolution2D
+from keras.layers.normalization import BatchNormalization
+from keras import backend as K
+os.environ['CUDA_VISIBLE_DEVICED']=''
+os.environ['KERAS_BACKEND']='thensorflow'
+
+
+
+import re
+
+def atoi(text):
+    return int(text) if text.isdigit() else text
+
+def natural_keys(text):
+    '''
+    alist.sort(key=natural_keys) sorts in human order
+    http://nedbatchelder.com/blog/200712/human_sorting.html
+    (See Toothy's implementation in the comments)
+    '''
+    return [ atoi(c) for c in re.split('(\d+)', text) ]
+
+
+script_name = 'final_custom_network_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65_train_per_batch_utilised_no2'
+
+channel_order = 'xray_green_optical_blue_empty_red'
+
+# hyperparameters
+no_classes = 2
+batch_size = 10
+epochs = 1000
+learning_rate = 0.0001
+reducer_factor = 0.75
+reducer_patience = 14
+reducer_min_lr = 0.00001
+#decay = 0.01
+do_train_augmentation = True
+do_valid_augmentation = False
+dense_no_neurons = 256
+dense_dropout = 0.65
+
+image_height = 356
+image_width = 356
+
+# Preparation of validation sample: specify numbers of lotto (experts) classes for validation
+number_of_valid_lowz = 100
+number_of_valid_highz = 100
+number_of_valid_nearby_galaxy = 35
+number_of_valid_edge = 2
+number_of_valid_artefact = 30
+number_of_valid_star_or_agn = 2
+number_of_valid_point = 25
+number_of_valid_double = 10
+
+# function for loading image names from repository
+def image_names(subset, channel_order=channel_order):
+    path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_RGB2GRAY_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last' % (subset, channel_order)
+    image_names = [f for f in listdir(path)]
+    image_names.sort(key=natural_keys)
+    return (image_names)
+
+all_train_and_valid_without_test_image_names = image_names(subset='all_train_and_valid_without_test')
+print ('len(all_train_and_valid_without_test_image_names) =', len(all_train_and_valid_without_test_image_names))
+
+
+lotto_classifications_of_train_and_valid_images = []
+
+text_file = open('/space/mkosiba/data_ml/final_data_and_labels/final_%s_labels.dat' % ('all_train_and_valid_without_test'))
+lines_of_text_file = text_file.read().split('\n')
+image_labels_in_prep = lines_of_text_file[1:-1]
+text_file.close()
+
+for i in range(len(image_labels_in_prep)):
+    single_labels_of_one_object = image_labels_in_prep[i].split(', ')
+    lotto_classifications_of_train_and_valid_images.append(single_labels_of_one_object[-1])
+
+
+# function for loading image labels from repository
+def image_labels(subset = 'train'):
+    text_file = open('/space/mkosiba/data_ml/final_data_and_labels/final_%s_labels.dat' % (subset))
+    lines_of_text_file = text_file.read().split('\n')
+    image_labels_in_prep = lines_of_text_file[1:-1]
+    text_file.close()
+
+    image_labels = np.empty([len(image_labels_in_prep), no_classes])
+
+    for i in range(len(image_labels_in_prep)):
+        single_labels_of_one_object = image_labels_in_prep[i].split(', ')
+        for j, item in enumerate(single_labels_of_one_object[:no_classes]):
+            image_labels[i][j] = float(item)
+    return (image_labels)
+
+all_train_and_valid_without_test_image_labels = image_labels(subset = 'all_train_and_valid_without_test')
+
+print ('len(all_train_and_valid_without_test_image_labels) = ', len(all_train_and_valid_without_test_image_labels))
+
+# This part is to calculate individual classes in a sample of objects prepared for training and validation (the sample is split to train and valid samples later on)
+counter_lowz = 0
+counter_highz = 0
+counter_dubious = 0
+counter_double = 0
+counter_artefact = 0
+counter_edge = 0
+counter_fossile_group = 0
+counter_nearby_galaxy = 0
+counter_no_optical_image = 0
+counter_point = 0
+counter_star_or_agn = 0
+
+positions_of_lowz = []
+positions_of_highz = []
+positions_of_dubious = []
+
+positions_of_double = []
+positions_of_point = []
+positions_of_star_or_agn = []
+
+positions_of_fossile_group = []
+positions_of_nearby_galaxy = []
+
+positions_of_no_optical_image = []
+positions_of_artefact = []
+positions_of_edge = []
+
+
+for i, classification in enumerate(lotto_classifications_of_train_and_valid_images):
+   if classification == '0 &lt; z &lt;~ 0.3':
+       positions_of_lowz.append(i)
+   if classification == 'z &gt; 0.3':
+       positions_of_highz.append(i)
+   if classification == 'dubious':
+       positions_of_dubious.append(i)
+
+   if classification == 'double':
+       positions_of_double.append(i)
+   if classification == 'point':
+       positions_of_point.append(i)
+   if classification == 'star or AGN':
+       positions_of_star_or_agn.append(i)
+
+   if classification == 'fossile group':
+       positions_of_fossile_group.append(i)
+   if classification == 'nearby galaxy':
+       positions_of_nearby_galaxy.append(i)
+
+   if classification == 'no optical image':
+       positions_of_no_optical_image.append(i)
+   if classification == 'artefact':
+       positions_of_artefact.append(i)
+   if classification == 'edge':
+       positions_of_edge.append(i)
+
+
+print ('len(positions_of_lowz) =', len(positions_of_lowz))
+print ('len(positions_of_highz) =', len(positions_of_highz))
+print ('len(positions_of_dubious) =', len(positions_of_dubious))
+
+print ('len(positions_of_double) =', len(positions_of_double))
+print ('len(positions_of_point) =', len(positions_of_point))
+print ('len(positions_of_star_or_agn) =', len(positions_of_star_or_agn))
+
+print ('len(positions_of_fossile_group) =', len(positions_of_fossile_group))
+print ('len(positions_of_nearby_galaxy) =', len(positions_of_nearby_galaxy))
+
+print ('len(positions_of_no_optical_image) =', len(positions_of_no_optical_image))
+print ('len(positions_of_artefact) =', len(positions_of_artefact))
+print ('len(positions_of_edge) =', len(positions_of_edge))
+
+# substraction of valid image ids from train and valid folder - numbers of classes for validation defined at the beginning under hyperparameters
+train_positions = positions_of_lowz[number_of_valid_lowz:] + positions_of_highz[number_of_valid_highz:] + positions_of_nearby_galaxy[number_of_valid_nearby_galaxy:] + positions_of_edge[number_of_valid_edge:]+ positions_of_artefact[number_of_valid_artefact:] + positions_of_star_or_agn[number_of_valid_star_or_agn:] + positions_of_point[number_of_valid_point:]+ positions_of_double[number_of_valid_double:]
+
+valid_positions = positions_of_lowz[:number_of_valid_lowz] + positions_of_highz[:number_of_valid_highz] + positions_of_nearby_galaxy[:number_of_valid_nearby_galaxy] + positions_of_edge[:number_of_valid_edge] + positions_of_artefact[:number_of_valid_artefact] + positions_of_star_or_agn[:number_of_valid_star_or_agn] + positions_of_point[:number_of_valid_point] + positions_of_double[:number_of_valid_double]
+
+train_image_names = [all_train_and_valid_without_test_image_names[position] for position in train_positions]
+valid_image_names = [all_train_and_valid_without_test_image_names[position] for position in valid_positions]
+test_image_names = image_names(subset='test')
+
+train_image_labels = [all_train_and_valid_without_test_image_labels[position] for position in train_positions]
+valid_image_labels = [all_train_and_valid_without_test_image_labels[position] for position in valid_positions]
+test_image_labels = image_labels(subset = 'test')
+
+train_ids_to_iterate = [i for i in range(len(train_image_names))]
+valid_ids_to_iterate = [i for i in range(len(valid_image_names))]
+
+test_image_ids = [i for i in range(len(test_image_names))]
+
+# function which loads images to network, it is used in generator
+def load_image(image_name, subset, channel_order, normalise=True):
+        path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_RGB2GRAY_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last/%s' % (subset, channel_order, image_name)
+        image = skimage.io.imread(path)
+        if normalise == True:
+            image = image.astype('float64') / 255.0 # normalise and convert to float
+        return image
+
+train_dataset_size = len(train_image_names)
+valid_dataset_size = len(valid_image_names)
+
+print ('train_dataset_size =', train_dataset_size)
+print ('valid_dataset_size =', valid_dataset_size)
+
+# this function, generator, (infinitely) generates balanced batches from unbalanced data set
+def generator(batch_size = batch_size, do_augmentation = True, image_height = image_height, image_width = image_width,
+              train_image_labels = train_image_labels, valid_image_labels = valid_image_labels, train_image_names = train_image_names, valid_image_names = valid_image_names, train_or_valid = 'train', train_ids_to_iterate = train_ids_to_iterate, valid_ids_to_iterate = valid_ids_to_iterate, no_classes = no_classes, channel_order = channel_order): 
+      
+    if train_or_valid == 'train':
+        image_labels = train_image_labels
+        image_names = train_image_names
+        ids_to_iterate = train_ids_to_iterate
+    if train_or_valid == 'test':
+        image_labels = valid_image_labels
+        image_names = valid_image_names
+        ids_to_iterate = valid_ids_to_iterate
+
+    while True:
+        np.random.shuffle(ids_to_iterate) # shuffles all image_ids, than picks one balanced batch from it and generates it
+        single_batch = []
+        counter_class_0 = 0
+        counter_class_1 = 0
+        for id_to_iterate in ids_to_iterate:
+            if image_labels[id_to_iterate][0] >= 0.5 and counter_class_0 < (batch_size//2):
+                single_batch.append(id_to_iterate)
+                counter_class_0 += 1
+            elif image_labels[id_to_iterate][1] > 0.5 and counter_class_1 < (batch_size//2):
+                single_batch.append(id_to_iterate)
+                counter_class_1 += 1
+
+        xs = []
+        ys = []
+        for batch_item in single_batch: # items of batches are ids of image names == ids of image labels
+                
+            image = load_image(image_names[batch_item], subset = 'all_train_and_valid_without_test', channel_order=channel_order, normalise=True) 
+            # subset up there calls train and valid at once just because I have them saved in a same folder together, 
+            # the substraction of valid images from 'all_train_and_valid_without_test' folder is at the beginning
+            if image_height != 356:
+                image = skimage.transform.resize(image, (image_height, image_width))
+            if do_augmentation == True:
+                zoom = np.random.uniform(1.0/1.3, 1.3)
+                rotation = np.random.uniform(0, 360)
+                shear = np.random.uniform(0, 0)
+                translation = np.random.uniform(-4, 4)
+
+                center_shift = np.array((image_height, image_width)) / 2. - 0.5
+                tform_center = skimage.transform.SimilarityTransform(translation=-center_shift)
+                tform_uncenter = skimage.transform.SimilarityTransform(translation=center_shift)
+                tform_augment = skimage.transform.AffineTransform(scale=(1/zoom, 1/zoom), 
+                                                                      rotation=np.deg2rad(rotation), 
+                                                                      shear=np.deg2rad(shear), 
+                                                                      translation=translation)
+
+                tform = tform_center + tform_augment + tform_uncenter
+                image = skimage.transform.warp(image, tform)
+            xs.append(image) # channels are by default last (we use tensorflow by default)
+            #xs.append(image.transpose((2,0,1))) # channels_first
+            ys.append(image_labels[batch_item])
+                
+              
+        yield(np.asarray(xs), np.asarray(ys))
+        
+
+train_generator = generator(batch_size = batch_size, do_augmentation = do_train_augmentation, image_height = image_height, image_width = image_width,
+              train_or_valid = 'train')
+
+valid_generator = generator(batch_size = batch_size, do_augmentation = do_valid_augmentation, image_height = image_height, image_width = image_width,
+              train_or_valid = 'train')
+
+# function creating an architecture of the network
+def final_network(image_heigh=image_height, image_width=image_width, dense_dropout=dense_dropout, dense_no_neurons=dense_no_neurons): 
+    from keras.layers import Input, Convolution2D, MaxPooling2D, AveragePooling2D, Dense, Dropout, Flatten, Concatenate, concatenate
+
+    in_dim = (image_heigh, image_width, 3)
+
+    input_data = Input(shape=(in_dim), name='data')
+
+    net = Convolution2D(64, (3, 3), name='conv1', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(input_data)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv2', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv3', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv4', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv5', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv6', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net=Flatten()(net) # makes reshape of 4D tensor into 2D tensor, because of the dense layer below
+
+    net = Dense(dense_no_neurons, name='fc1', activation='relu')(net)
+    dropout = Dropout(dense_dropout)(net)
+
+    net = Dense(2, name='fc2', activation='softmax')(net)
+
+    from keras.models import Model
+    model = Model(input=[input_data], output=net)
+
+    return model
+
+
+model = final_network()
+
+from keras.callbacks import Callback
+from keras.callbacks import ModelCheckpoint # checkpointer for saving networks best variant
+from keras.callbacks import ReduceLROnPlateau
+checkpointer = ModelCheckpoint(filepath="/space/mkosiba/saved_nets/%s.h5" % (script_name), verbose=1, save_best_only=True)
+history = keras.callbacks.History()
+lr_reducer = ReduceLROnPlateau(monitor='val_loss', factor=reducer_factor, patience=reducer_patience, min_lr=reducer_min_lr, verbose=1)
+
+#adagrad = optimizers.Adagrad(lr=learning_rate, epsilon=None, decay=0.0) # lr=0.01
+#adadelta = optimizers.Adadelta(lr=learning_rate, rho=0.95, epsilon=None, decay=decay) # lr=1.0
+#adam = optimizers.Adam(lr=learning_rate, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False) # lr=0.001
+sgd = optimizers.SGD(lr=learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
+model.compile(optimizer=sgd, loss='categorical_crossentropy', metrics=['accuracy']) # loss='mse', loss='categorical_crossentropy', loss='binary_crossentropy'
+
+print ("FITTING")   
+model.fit_generator(train_generator, steps_per_epoch=train_dataset_size//batch_size, epochs=epochs, validation_data=valid_generator, validation_steps=valid_dataset_size//batch_size, callbacks=[checkpointer, history, lr_reducer])   
+
+model.save_weights("/space/mkosiba/saved_nets/%s_last_epoch.h5" % (script_name))
+print("Saved model to disk")
+
+
+# summarize history for loss
+title = 'Losses'
+plt.figure(1)
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('%s' % (title))
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'valid'], loc='upper left')
+plt.savefig('/space/mkosiba/figures_ml/%s_%s' % (title, script_name))
+#plt.show()
+
+# summarize history for accuracy
+plt.figure(2)
+title = 'Accuracies'
+plt.plot(history.history['acc'])
+plt.plot(history.history['val_acc'])
+plt.title('%s' % (title))
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.legend(['train_acc', 'valid_acc'], loc='upper left')
+plt.savefig('/space/mkosiba/figures_ml/%s_%s' % (title, script_name))
+#plt.show()
+
+# Save logs of losses and accs
+text_file = open('/space/mkosiba/history_of_losses_and_accs_ml/%s.logs' % (script_name), 'w')
+text_file.write('loss, val_loss, acc, val_acc' + '\n')
+for i in range(len(history.history['loss'])):
+    text_file.write(str(history.history['loss'][i]) + ';' + str(history.history['val_loss'][i]) + ';' + str(history.history['acc'][i]) + ';' + str(history.history['val_acc'][i]) + '\n')
+text_file.close()
+
+
+
+from datetime import datetime
+startTime = datetime.now()
+
+# Evaluation of the network on the test data set
+print ("STARTING PREDICTING")
+test_ids = test_image_ids 
+test_names = [test_image_names[test_id] for test_id in test_ids]
+
+predictions = []
+text_file = open('/space/mkosiba/predictions/predictions_%s.txt' % (script_name), 'w')
+text_file.write('cluster, no_cluster' + '\n')
+for test_name in test_names:
+    image = load_image(image_name = test_name, subset='test', channel_order=channel_order, normalise=True)
+    if image_height != 356:
+        image = skimage.transform.resize(image, (image_height, image_width))
+    prediction = model.predict(image[np.newaxis,:,:,:])
+    predictions.append(prediction)
+    text_file.write(str(prediction) + '\n')
+print ("DONE PREDICTING")
+print (datetime.now() - startTime)
+
+print ('Printing all predictions:')
+for prediction in predictions:
+    print (prediction)
+
+# Save logs of losses and accs
+text_file = open('/space/mkosiba/history_of_losses_and_accs_ml/logs_of_losses_and_accs_%s.txt' % (script_name), 'w')
+text_file.write('class_0, class_1' + '\n')
+for i in range(len(predictions)):
+    text_file.write(str(predictions[i][0][0]) + ';' + str(predictions[i][0][1]) + '\n')
+text_file.close()
+
+test_labels = []
+for test_id in test_ids:
+    test_labels.append(test_image_labels[test_id])
+test_labels = np.asarray(test_labels)
+
+y_labels = np.zeros((len(test_ids)))
+for i in range(len(y_labels)):
+    y_labels[i] += (test_labels[i][0])
+
+y_pred_keras = np.zeros((len(test_ids)))
+for i in range(len(y_pred_keras)):
+    y_pred_keras[i] += (predictions[i][0][0])
+
+from sklearn.metrics import roc_curve
+fpr_keras, tpr_keras, thresholds_keras = roc_curve(y_labels, y_pred_keras)
+
+from sklearn.metrics import auc
+auc_keras = auc(fpr_keras, tpr_keras)
+
+title = 'ROC'
+plt.figure(3)
+plt.plot([0, 1], [0, 1], 'k--')
+plt.plot(fpr_keras, tpr_keras, label='AUC = {:.3f}'.format(auc_keras))
+plt.xlabel('False positive rate')
+plt.ylabel('True positive rate')
+plt.title('ROC curve')
+plt.legend(loc='lower right')
+#plt.legend(loc='best')
+plt.savefig('/space/mkosiba/ROC_ml/%s_%s_last_epoch' % (title, script_name))
+#plt.show()
+
+print (script_name)
+
+test_labels = test_image_labels
+
+TP = 0 # correctly predicted positive values
+TN = 0 # correctly predicted negative values
+FP = 0 # when actual class is no and predicted class is yes
+FN = 0 # when actual class is yes but predicted class is no
+correctly_predicted_class_0 = 0 # clusters
+correctly_predicted_class_1 = 0 # non-clusters
+
+for i, test_label in enumerate(test_labels):
+    if test_label[0] == 1.0 and predictions[i][0][0] > 0.5: #label=class_0 & predicted=class_0
+        TP += 1
+        correctly_predicted_class_0 += 1
+    elif test_label[1] == 1.0 and predictions[i][0][1] > 0.5: #label=class_1 & predictes=class_1
+        TN += 1
+        correctly_predicted_class_1 += 1
+    elif test_label[1] == 1.0 and predictions[i][0][0] > 0.5: #label=class_1 & predicted=class_0
+        FP += 1
+    elif test_label[0] == 1.0 and predictions[i][0][1] > 0.5: #label=class_0 & predicted=class_1
+        FN += 1
+
+    
+
+print ('correctly_predicted_class_0 = ' + str(correctly_predicted_class_0) + ' #clusters')
+print ('correctly_predicted_class_1 = ' + str(correctly_predicted_class_1) + ' #non-clusters')
+
+total_predictions_for_class_0 = 0
+total_predictions_for_class_1 = 0
+for prediction in predictions:
+    if prediction[0][0] > 0.5:
+        total_predictions_for_class_0 += 1
+    elif prediction[0][1] > 0.5:
+        total_predictions_for_class_1 += 1
+print ('total_predictions_for_class_0 = ' + str(total_predictions_for_class_0))
+print ('total_predictions_for_class_1 = ' + str(total_predictions_for_class_1))
+
+print ('TP = ' + str(TP) + ' #correctly predicted positive values')
+print ('TN = ' + str(TN) + ' #correctly predicted negative values')
+print ('FP = ' + str(FP) + ' #when actual class is no and predicted class is yes')
+print ('FN = ' + str(FN) + ' #when actual class is yes but predicted class is no')
+
+accuracy = (TP + TN) / (TP + FP + FN + TN)
+precision = TP / (TP + FP)
+recall = TP / (TP + FN)
+f1_score = 2*(recall*precision) / (recall + precision)
+
+print ('Accuracy = ' + str(accuracy))
+print ('Precision = ' + str(precision))
+print ('Recall = ' + str(recall))
+print ('F1_score = ' + str(f1_score))
