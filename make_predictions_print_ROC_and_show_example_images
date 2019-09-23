@@ -1,0 +1,278 @@
+# This script loads trained network with a name selected in "network_name_to_load", settles its architecture, than uploads its weights, feeds it with images to make predictions
+# The network was trained on PNG images with 356x356 pixel size, te input has to be the same, the colour channels must be taken care by the user, script will resize images if not 356x356 automatically
+# I  have my data set of images and labels saved in the same order, so I iterate through them by indexing. 
+# Function image_names loads names of images from the folder they are saved at, image_labels does the same with labels. Function load_image loads image and command model.predict makes network classifying command's input image.
+# Saving predictions to atext file is commented, thhe script is made mainly for evaluation of a network on a test data set, so there is a part which compares networks predictions with actual labels and plots ROC curve, if using on an unknown objects, comment the end parts (stated where to comment from in a comment) at the end and uncomment saving of predictions.
+
+import numpy as np
+import skimage
+import skimage.transform
+import skimage.io
+import matplotlib.pyplot as plt
+import os
+from os import listdir
+from os.path import isfile, join
+
+import keras
+from keras.applications.xception import Xception
+from keras.applications.inception_v3 import InceptionV3
+from keras.preprocessing import image
+from keras import optimizers
+from keras.models import Model
+from keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from keras import backend as K
+os.environ['KERAS_BACKEND']='thensorflow'
+
+import re
+
+def atoi(text):
+    return int(text) if text.isdigit() else text
+
+def natural_keys(text):
+    '''
+    alist.sort(key=natural_keys) sorts in human order
+    http://nedbatchelder.com/blog/200712/human_sorting.html
+    (See Toothy's implementation in the comments)
+    '''
+    return [ atoi(c) for c in re.split('(\d+)', text) ]
+
+network_name_to_load = 'final_custom_network_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65_train_per_batch_utilised_no2_last_epoch'
+#network_name_to_load = 'final_custom_network_ZOONIVERSE_balanced_1000_train_binary_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65_last_epoch'
+#network_name_to_load = 'final_custom_network_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65_last_epoch'
+#network_name_to_load = 'final_custom_network_ZOONIVERSE_augmented_to_train_zoo_and_also_test_on_zoo_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65'
+#network_name_to_load = 'final_custom_network_ZOONIVERSE_augmented_to_train_zoo_and_also_test_on_zoo_xray_green_optical_blue_empty_red_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65'
+#network_name_to_load = 'final_custom_network_solo_png_optical_lr_0_0001_min_lr_0_00001_1xconv_3x3x64_5xconv_3x3x32_dens_256_drop_0_65_last_epoch'
+channel_order = 'xray_green_optical_blue_empty_red'
+#channel_order = 'xray_green_optical_red_empty_blue'
+#channel_order = 'solo_png_optical'
+
+no_classes = 2
+batch_size = 10
+epochs = 1000
+learning_rate = 0.0001
+reducer_factor = 0.75
+reducer_patience = 14
+reducer_min_lr = 0.00001
+#decay = 0.01
+do_train_augmentation = True
+do_valid_augmentation = False
+dense_no_neurons = 256
+dense_dropout = 0.65
+
+image_height = 356
+image_width = 356
+
+
+def final_network(image_heigh=image_height, image_width=image_width, dense_dropout=dense_dropout, dense_no_neurons=dense_no_neurons): 
+    from keras.layers import Input, Convolution2D, MaxPooling2D, AveragePooling2D, Dense, Dropout, Flatten, Concatenate, concatenate
+
+    in_dim = (image_heigh, image_width, 3)
+
+    input_data = Input(shape=(in_dim), name='data')
+
+    net = Convolution2D(64, (3, 3), name='conv1', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(input_data)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv2', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv3', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv4', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv5', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net = Convolution2D(32, (3, 3), name='conv6', kernel_initializer='glorot_uniform', padding='same', activation='relu', data_format="channels_last")(net)
+    net = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', data_format="channels_last")(net)
+
+    net=Flatten()(net) # makes reshape of 4D tensor into 2D tensor, because dense layer below must have a matrix as the input
+
+    net = Dense(dense_no_neurons, name='fc1', activation='relu')(net)
+    dropout = Dropout(dense_dropout)(net)
+
+    net = Dense(2, name='fc2', activation='softmax')(net)
+
+    from keras.models import Model
+    model = Model(input=[input_data], output=net)
+
+    return model
+
+model = final_network()
+
+model.load_weights('/space/mkosiba/saved_nets/%s.h5' % (network_name_to_load))
+
+# Load data to predict
+def image_names(subset, channel_order=channel_order):
+    if channel_order != 'solo_png_optical' or channel_order != 'solo_png_x_ray':
+        path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_RGB2GRAY_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last' % (subset, channel_order)
+    if channel_order == 'solo_png_optical'or channel_order == 'solo_png_x_ray':
+        path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last' % (subset, channel_order)
+    image_names = [f for f in listdir(path)]
+    image_names.sort(key=natural_keys)
+    return (image_names)
+
+test_image_names = image_names(subset='test')
+print ('len(test_image_names) =', len(test_image_names))
+
+def image_labels(subset = 'train'):
+    text_file = open('/space/mkosiba/data_ml/final_data_and_labels/final_%s_labels.dat' % (subset))
+    lines_of_text_file = text_file.read().split('\n')
+    image_labels_in_prep = lines_of_text_file[1:-1] # discard header and last empty line
+    text_file.close()
+
+    image_labels = np.empty([len(image_labels_in_prep), no_classes])
+
+    for i in range(len(image_labels_in_prep)):
+        single_labels_of_one_object = image_labels_in_prep[i].split(', ')
+        for j, item in enumerate(single_labels_of_one_object):
+            image_labels[i][j] = item
+    return (image_labels)
+
+test_image_labels = image_labels(subset = 'test')
+
+print ('len(test_image_labels) = ', len(test_image_labels))
+
+def load_image(image_name, subset, channel_order, normalise=True):
+        if channel_order != 'solo_png_optical'or channel_order != 'solo_png_x_ray':
+            path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_RGB2GRAY_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last/%s' % (subset, channel_order, image_name)
+        if channel_order == 'solo_png_optical'or channel_order == 'solo_png_x_ray':
+            path = '/space/mkosiba/data_ml/final_data_and_labels/final_%s_dataset_356x356_%s_data_from_xclass_3.5_vs_3.3_3.4_lotoclass_1876obj_cutting_last/%s' % (subset, channel_order, image_name)
+        image = skimage.io.imread(path)
+        if normalise == True:
+            image = image.astype('float64') / 255.0 # normalise and convert to float
+        return image
+
+test_image_ids = np.arange(len(test_image_labels))
+
+test_dataset_size =len(test_image_ids)
+
+print ('test_dataset_size =', test_dataset_size)
+
+
+from datetime import datetime
+startTime = datetime.now()
+
+print ("STARTING PREDICTING")
+
+# predictions can be written to a text file, or printed, uncomment the 4 commented lines below (and change the paths of course) to save the predictions.
+predictions = []
+#text_file = open('/space/mkosiba/predictions/predictions_%s.txt' % (network_name_to_load), 'w')
+#text_file.write('image_name, cluster, non_cluster' + '\n')
+for test_name in test_image_names:
+    image = load_image(image_name = test_name, subset='test', channel_order=channel_order, normalise=True)
+    if image_height != 356:
+        image = skimage.transform.resize(image, (image_height, image_width))
+    prediction = model.predict(image[np.newaxis,:,:,:])
+    predictions.append(prediction)
+    
+    #text_file.write(test_name + str(prediction) + '\n')
+    #text_file.write(str(prediction) + '\n')
+print ("DONE PREDICTING")
+print (datetime.now() - startTime)
+
+
+# Comment everyting from this point if not using for testing purposes - if using on an unknown objects :)
+test_labels = []
+for test_id in test_image_ids:
+    test_labels.append(test_image_labels[test_id])
+test_labels = np.asarray(test_labels)
+
+y_labels = np.zeros((len(test_image_ids)))
+for i in range(len(y_labels)):
+    y_labels[i] += (test_labels[i][0])
+
+y_pred_keras = np.zeros((len(test_image_ids)))
+for i in range(len(y_pred_keras)):
+    y_pred_keras[i] += (predictions[i][0][0])
+
+from sklearn.metrics import roc_curve
+fpr_keras, tpr_keras, thresholds_keras = roc_curve(y_labels, y_pred_keras)
+
+from sklearn.metrics import auc
+auc_keras = auc(fpr_keras, tpr_keras)
+
+title = 'ROC'
+plt.figure(3)
+plt.plot([0, 1], [0, 1], 'k--')
+plt.plot(fpr_keras, tpr_keras, label='AUC = {:.3f}'.format(auc_keras))
+plt.xlabel('False positive rate')
+plt.ylabel('True positive rate')
+plt.margins(x=0)
+plt.margins(y=0)
+plt.title('ROC curve')
+plt.legend(loc='lower right')
+#plt.legend(loc='best')
+#plt.savefig('/space/mkosiba/ROC_ml/ROC_%s_last_epoch' % (network_name_to_load))
+plt.show()
+
+test_labels = []
+for test_id in test_image_ids:
+    test_labels.append(test_image_labels[test_id])
+test_labels = np.asarray(test_labels)
+
+TP = 0 # correctly predicted positive values
+TN = 0 # correctly predicted negative values
+FP = 0 # when actual class is no and predicted class is yes
+FN = 0 # when actual class is yes but predicted class is no
+correctly_predicted_class_0 = 0 # clusters
+correctly_predicted_class_1 = 0 # non-clusters
+
+TP_short_names = []
+TN_short_names = []
+FP_short_names = []
+FN_short_names = []
+for i, test_label in enumerate(test_labels):
+    if test_label[0] == 1.0 and predictions[i][0][0] > 0.5: #label=cluster & predicted=cluster
+        TP += 1
+        TP_short_names.append(test_image_names[i])
+        correctly_predicted_class_0 += 1
+    elif test_label[1] == 1.0 and predictions[i][0][1] > 0.5: #label=non-cluster & predictes=non-cluster
+        TN += 1
+        TN_short_names.append(test_image_names[i])
+        correctly_predicted_class_1 += 1
+    elif test_label[1] == 1.0 and predictions[i][0][0] > 0.5: #label=non-cluster & predicted=cluster
+        FP += 1
+        FP_short_names.append(test_image_names[i])
+    elif test_label[0] == 1.0 and predictions[i][0][1] > 0.5: #label=cluster & predicted=non-cluster
+        FN += 1
+        FN_short_names.append(test_image_names[i])
+
+print ('FP_short_names: (when actuall class is non-cluster and predicted class is cluster)')
+for item in FP_short_names:
+    print (item)
+
+print ('FN_short_names: (when actuall class is cluster and predicted class is non-cluster)')
+for item in FN_short_names:
+    print (item)
+
+print (network_name_to_load)
+print ('correctly_predicted_class_0 = ' + str(correctly_predicted_class_0) + ' #clusters')
+print ('correctly_predicted_class_1 = ' + str(correctly_predicted_class_1) + ' #non-clusters')
+
+total_predictions_for_class_0 = 0
+total_predictions_for_class_1 = 0
+for prediction in predictions:
+    if prediction[0][0] > 0.5:
+        total_predictions_for_class_0 += 1
+    elif prediction[0][1] > 0.5:
+        total_predictions_for_class_1 += 1
+print ('total_predictions_for_class_0 = ' + str(total_predictions_for_class_0))
+print ('total_predictions_for_class_1 = ' + str(total_predictions_for_class_1))
+
+print ('TP = ' + str(TP) + ' #correctly predicted positive values')
+print ('TN = ' + str(TN) + ' #correctly predicted negative values')
+print ('FP = ' + str(FP) + ' #when actual class is no and predicted class is yes')
+print ('FN = ' + str(FN) + ' #when actual class is yes but predicted class is no')
+
+accuracy = (TP + TN) / (TP + FP + FN + TN)
+precision = TP / (TP + FP)
+recall = TP / (TP + FN)
+f1_score = 2*(recall*precision) / (recall + precision)
+
+print ('Accuracy = ' + str(accuracy))
+print ('Precision = ' + str(precision))
+print ('Recall = ' + str(recall))
+print ('F1_score = ' + str(f1_score))
